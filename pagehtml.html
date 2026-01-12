@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Network Forensic Pro - Edition Finale</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;900&display=swap');
+        body { background: #020617; color: #e2e8f0; font-family: 'Inter', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .glass-card { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(51, 65, 85, 0.5); border-radius: 12px; }
+        .attack-alert { border-left: 4px solid #ef4444; background: rgba(239, 68, 68, 0.1); }
+    </style>
+</head>
+<body class="p-4">
+
+    <div id="setup-view" class="max-w-xl mx-auto mt-20 p-10 glass-card text-center">
+        <h1 class="text-3xl font-black mb-4 text-blue-500 uppercase">Forensic Analyzer</h1>
+        <input type="file" id="fileInput" class="hidden" accept=".txt">
+        <button onclick="document.getElementById('fileInput').click()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-lg transition-all">
+            CHARGER LE LOG (.TXT)
+        </button>
+    </div>
+
+    <div id="main-view" class="hidden max-w-7xl mx-auto space-y-6">
+        
+        <div class="flex justify-between items-center bg-slate-900 p-4 rounded-xl border border-white/10">
+            <h2 class="font-bold uppercase tracking-widest text-blue-400">Security Operations Center</h2>
+            <button onclick="location.reload()" class="text-xs text-slate-500 hover:text-white">NOUVEAU SCAN</button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+            <div class="lg:col-span-3 grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="glass-card p-4 text-center"><p class="text-[10px] text-slate-500 uppercase">RTT Moyen</p><p id="stat-rtt" class="text-xl font-black text-emerald-400 mono">0 ms</p></div>
+                <div class="glass-card p-4 text-center"><p class="text-[10px] text-slate-500 uppercase">Paquets</p><p id="stat-pkts" class="text-xl font-black text-white mono">0</p></div>
+                <div class="glass-card p-4 text-center"><p class="text-[10px] text-slate-500 uppercase">Ports</p><p id="stat-ports" class="text-xl font-black text-white mono">0</p></div>
+                <div class="glass-card p-4 text-center"><p class="text-[10px] text-slate-500 uppercase">Trafic</p><p id="stat-vol" class="text-xl font-black text-white mono">0 KB</p></div>
+            </div>
+            <div id="attackBox" class="glass-card p-4 space-y-2 overflow-y-auto max-h-[120px]">
+                <p class="text-[10px] font-bold text-red-500 uppercase">Alertes IDS</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="glass-card p-4"><h3 class="text-center text-[10px] mb-4 uppercase">Flags TCP (Bruts)</h3><canvas id="flagsChart"></canvas></div>
+            <div class="glass-card p-4"><h3 class="text-center text-[10px] mb-4 uppercase">Top Ports Destination</h3><canvas id="portsChart"></canvas></div>
+            <div class="glass-card p-4"><h3 class="text-center text-[10px] mb-4 uppercase">Protocoles Détectés</h3><canvas id="protoChart"></canvas></div>
+        </div>
+
+        <div class="glass-card p-6">
+            <h3 class="text-center text-[10px] mb-4 uppercase">Activité par IP Source (Cliquez pour filtrer)</h3>
+            <canvas id="mainChart" height="80"></canvas>
+        </div>
+    </div>
+
+    <script>
+        let db = {};
+        let charts = {};
+
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const reader = new FileReader();
+            reader.onload = function() {
+                parse(this.result);
+                document.getElementById('setup-view').classList.add('hidden');
+                document.getElementById('main-view').classList.remove('hidden');
+            };
+            reader.readAsText(e.target.files[0]);
+        });
+
+        function parse(content) {
+            const lines = content.split('\n');
+            const syns = new Map();
+            db = {};
+
+            lines.forEach(line => {
+                if (!line.includes(" IP ")) return;
+                try {
+                    const p = line.trim().split(/\s+/);
+                    const ts = p[0].split(':').reduce((acc,time,i) => acc + parseFloat(time) * [3600, 60, 1][i], 0);
+                    const src = p[2].split('.'); const pSrc = src.pop(); const ipSrc = src.join('.');
+                    const dst = p[4].replace(':','').split('.'); const pDst = dst.pop(); const ipDst = dst.join('.');
+                    const f = line.match(/\[(.*?)\]/)?.[1] || ".";
+                    const l = line.includes("length ") ? parseInt(line.split("length ")[1]) : 0;
+
+                    let rtt = null;
+                    if (f === "S") syns.set(`${ipSrc}:${pSrc}->${ipDst}:${pDst}`, ts);
+                    if (f === "S." && syns.has(`${ipDst}:${pDst}->${ipSrc}:${pSrc}`)) {
+                        rtt = (ts - syns.get(`${ipDst}:${pDst}->${ipSrc}:${pSrc}`)) * 1000;
+                    }
+
+                    if (!db[ipSrc]) db[ipSrc] = { pkts:0, rtts:[], flags:{}, ports:{}, vol:0, protos:{'TCP':0,'UDP':0} };
+                    db[ipSrc].pkts++;
+                    db[ipSrc].vol += l;
+                    db[ipSrc].flags[f] = (db[ipSrc].flags[f] || 0) + 1;
+                    db[ipSrc].ports[pDst] = (db[ipSrc].ports[pDst] || 0) + 1;
+                    db[ipSrc].protos[line.includes("UDP") ? 'UDP' : 'TCP']++;
+                    if (rtt) db[ipSrc].rtts.push(rtt);
+                } catch(e) {}
+            });
+            render();
+        }
+
+        function render() {
+            const ips = Object.keys(db);
+            const box = document.getElementById('attackBox');
+            box.innerHTML = '<p class="text-[10px] font-bold text-red-500 uppercase mb-2">Alertes IDS</p>';
+
+            ips.forEach(ip => {
+                const d = db[ip];
+                if((d.flags['S']||0) > 40) box.innerHTML += `<div class="attack-alert px-2 py-1 text-[10px] text-white mono">SYN FLOOD: ${ip}</div>`;
+                if(Object.keys(d.ports).length > 20) box.innerHTML += `<div class="attack-alert px-2 py-1 text-[10px] text-white mono" style="border-color:orange">SCAN: ${ip}</div>`;
+            });
+
+            if(charts.main) charts.main.destroy();
+            charts.main = new Chart(document.getElementById('mainChart'), {
+                type: 'bar',
+                data: { labels: ips, datasets: [{ label: 'Paquets', data: ips.map(i => db[i].pkts), backgroundColor: '#3b82f6' }] },
+                options: { onClick: (e, items) => { if(items.length > 0) update(ips[items[0].index]); }, scales: { y: { ticks: { color: '#64748b' } } } }
+            });
+            update(ips[0]);
+        }
+
+        function update(ip) {
+            const d = db[ip];
+            document.getElementById('stat-rtt').innerText = d.rtts.length ? (d.rtts.reduce((a,b)=>a+b,0)/d.rtts.length).toFixed(3) + " ms" : "0 ms";
+            document.getElementById('stat-pkts').innerText = d.pkts;
+            document.getElementById('stat-ports').innerText = Object.keys(d.ports).length;
+            document.getElementById('stat-vol').innerText = (d.vol/1024).toFixed(1) + " KB";
+
+            const createChart = (id, type, labels, data, colors) => {
+                if(charts[id]) charts[id].destroy();
+                charts[id] = new Chart(document.getElementById(id), {
+                    type: type,
+                    data: { labels: labels, datasets: [{ data: data, backgroundColor: colors }] },
+                    options: { plugins: { legend: { display: type === 'doughnut', labels: { color: '#94a3b8', font: { size: 9 } } } } }
+                });
+            };
+
+            createChart('flagsChart', 'doughnut', Object.keys(d.flags), Object.values(d.flags), ['#3b82f6','#10b981','#f59e0b','#ef4444','#6366f1']);
+            const pS = Object.entries(d.ports).sort((a,b)=>b[1]-a[1]).slice(0,5);
+            createChart('portsChart', 'bar', pS.map(x=>":"+x[0]), pS.map(x=>x[1]), '#a855f7');
+            createChart('protoChart', 'doughnut', Object.keys(d.protos), Object.values(d.protos), ['#3b82f6','#94a3b8']);
+        }
+    </script>
+</body>
+</html>
